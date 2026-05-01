@@ -1,0 +1,9 @@
+DATASET/
+/MAJOR PROJECT FINAL EXTRA/
+*.tsv
+*.csv
+*.wav
+*.mp3
+__pycache__/
+.env
+*.pth
