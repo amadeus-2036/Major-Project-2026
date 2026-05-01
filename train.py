@@ -24,7 +24,7 @@ CODEC_CSV      = r"C:\Users\Deepal\Desktop\College\SEM VI\MAJOR PROJECT FINAL\DA
 BATCH_SIZE    = 64
 EPOCHS        = 10
 DEVICE        = "cuda" if torch.cuda.is_available() else "cpu"
-PATIENCE      = 3
+PATIENCE      = 4  # Increased slightly to give the model time to generalize
 
 TRAIN_SAMPLES = 100000
 VAL_SAMPLES   = 80000
@@ -63,7 +63,7 @@ print("Codec map loaded:", CODEC_MAP)
 def extract_codec_id(fid):
     return FILE_TO_CODEC_ID.get(fid)
 
-# ================== TSV (THE CODEC HUNTER) ==================
+# ================== TSV HUNTER ==================
 def load_track1_ids(tsv):
     ids = set()
     with open(tsv, "r") as f:
@@ -121,15 +121,25 @@ def print_confusion(labels, preds, name):
     print(f"  FRR (spoof missed)     : {frr:.2f}%")
     print(f"  FAR (bonafide flagged) : {far:.2f}%")
 
-# ================== SPECAUGMENT ==================
+# ================== ADVANCED TELECOM AUGMENTATION ==================
 def spec_augment(x):
-    _, freq, time = x.shape
-    f  = random.randint(0, min(30, freq))
-    t  = random.randint(0, min(40, time))
+    _, freq, time_len = x.shape
+    
+    # 1. Frequency Masking (Simulates Codec Bandwidth Limits)
+    f  = random.randint(0, min(40, freq))
     f0 = random.randint(0, max(0, freq - f))
-    t0 = random.randint(0, max(0, time - t))
     x[:, f0:f0 + f, :]  = 0
+    
+    # 2. Time Masking (Simulates packet loss / dropouts)
+    t  = random.randint(0, min(50, time_len))
+    t0 = random.randint(0, max(0, time_len - t))
     x[:, :, t0:t0 + t]  = 0
+    
+    # 3. Telecom Noise Injection (Forces robust feature learning)
+    if random.random() < 0.3:  # 30% chance to add static noise
+        noise = torch.randn_like(x) * 0.1
+        x = x + noise
+        
     return x
 
 # ================== DATASET ==================
@@ -173,14 +183,12 @@ class SpectrogramDataset(IterableDataset):
                     if file_ids is not None:
                         raw = str(file_ids[i])
                         raw_stem = Path(raw).stem
-
                         for ext in [".flac", ".wav", ".pt"]:
                             if raw_stem.lower().endswith(ext):
                                 raw_stem = raw_stem[:-len(ext)]
                         fid = raw_stem.strip().lower()
                     else:
-                        raw_stem = ""
-                        fid      = "unknown"
+                        fid = "unknown"
 
                     if self.augment:
                         x = spec_augment(x)
@@ -198,8 +206,9 @@ for pname, param in model.named_parameters():
     if "layer1" in pname or "layer2" in pname:
         param.requires_grad = False
 
+# Increased Dropout to 0.6 to fight extreme overfitting
 model.fc = nn.Sequential(
-    nn.Dropout(0.5),
+    nn.Dropout(0.6),
     nn.Linear(model.fc.in_features, 2)
 )
 model = model.to(DEVICE)
@@ -210,7 +219,7 @@ criterion = nn.CrossEntropyLoss(weight=CLASS_WEIGHTS, label_smoothing=0.05)
 optimizer = optim.Adam(
     filter(lambda p: p.requires_grad, model.parameters()),
     lr=3e-5,
-    weight_decay=5e-4
+    weight_decay=1e-3  # Increased weight decay (L2 Regularization)
 )
 
 scheduler = torch.optim.lr_scheduler.SequentialLR(
@@ -258,11 +267,8 @@ def evaluate_both(model, loader):
     model.eval()
 
     all_p, all_l, all_s = [], [], []
-    
-    # Isolate ALL Bonafides to calculate proper ASVspoof EERs
     bona_l, bona_s = [], []
     
-    # Group ONLY Spoofs by their specific codec
     codec_spoof_p = defaultdict(list)
     codec_spoof_l = defaultdict(list)
     codec_spoof_s = defaultdict(list)
@@ -287,11 +293,9 @@ def evaluate_both(model, loader):
                 all_p.append(p); all_l.append(l); all_s.append(s)
 
                 if l == 0: 
-                    # True Bonafide
                     bona_l.append(l)
                     bona_s.append(s)
                 elif l == 1: 
-                    # True Spoof (These have codecs)
                     cid = extract_codec_id(fid)
                     if cid:
                         codec_spoof_p[cid].append(p)
@@ -305,7 +309,6 @@ def evaluate_both(model, loader):
     print("  OVERALL TRACK 1 EVALUATION (All data combined)")
     print("="*55)
     if all_l:
-        print(classification_report(all_l, all_p, target_names=["Bonafide", "Spoof"]))
         print_confusion(all_l, all_p, "Overall Dev Set")
         overall_eer, overall_thr = compute_eer(all_l, all_s)
         print(f"\n  OVERALL EER : {overall_eer:.2f}%  (threshold = {overall_thr:.3f})")
@@ -317,25 +320,20 @@ def evaluate_both(model, loader):
     # ══════════════════════════════════════════════════
     if codec_spoof_l:
         print("\n" + "="*55)
-        print("  PER-CODEC ROBUSTNESS (All Bonafides vs Codec Spoofs)")
+        print("  PER-CODEC ROBUSTNESS")
         print("="*55)
         print(f"  {'Codec':<6}  {'Name':<20}  {'N(Spoofs)':>10}  {'Spoof Acc':>9}  {'EER':>7}")
         print(f"  {'-'*6}  {'-'*20}  {'-'*10}  {'-'*9}  {'-'*7}")
 
-        # Sort C1, C2, C3 properly
         for cid in sorted(codec_spoof_l.keys(), key=lambda x: int(x.replace('C', '')) if x.replace('C','').isdigit() else 99):
-            
-            # Combine ALL Bonafides with this specific codec's Spoofs to get a valid EER!
             eval_l = bona_l + codec_spoof_l[cid]
             eval_s = bona_s + codec_spoof_s[cid]
             
-            # Accuracy just for detecting this specific codec's spoofs
             ps = codec_spoof_p[cid]
             ls = codec_spoof_l[cid]
             spoof_acc = sum(p == l for p, l in zip(ps, ls)) / len(ls)
             
             eer, _ = compute_eer(eval_l, eval_s)
-            
             name = CODEC_MAP.get(cid, f"Codec {cid}")
             print(f"  {cid:<6}  {name:<20}  {len(ls):>10,}  {spoof_acc:>9.4f}  {eer:>6.2f}%")
 
@@ -344,7 +342,7 @@ def evaluate_both(model, loader):
 
 # ================== TRAIN ==================
 total_start = time.time()
-best_acc    = 0.0
+best_eer    = 100.0  # WE NOW TARGET THE LOWEST EER
 no_improve  = 0
 
 for epoch in range(EPOCHS):
@@ -380,36 +378,31 @@ for epoch in range(EPOCHS):
 
     scheduler.step()
 
-    gap = val_acc - overall_acc
-    if gap > 0.08:
-        print(f"\n⚠️ Overfit gap: Val={val_acc:.4f} vs Dev={overall_acc:.4f} (gap={gap:.4f})")
-
     epoch_time = time.time() - epoch_start
     eta        = (EPOCHS - epoch - 1) * (time.time() - total_start) / (epoch + 1)
 
     print(f"\n{'─'*55}")
     print(f"  Train : {train_acc:.4f}")
-    print(f"  Val   : {val_acc:.4f}  ← informational only")
-    print(f"  Dev   : Acc={overall_acc:.4f}  EER={overall_eer:.2f}%  ← checkpoint signal")
+    print(f"  Dev   : Acc={overall_acc:.4f}  EER={overall_eer:.2f}%  ← Checkpoint signal")
     print(f"  Time  : {epoch_time/60:.1f} min  |  ETA: {eta/60:.1f} min")
     print(f"{'─'*55}")
 
-    if overall_acc > best_acc:
-        best_acc = overall_acc
+    # SAVING BASED ON EER DECREASE, NOT ACCURACY INCREASE
+    if overall_eer < best_eer:
+        best_eer = overall_eer
         no_improve = 0
         torch.save({
             "epoch":       epoch + 1,
             "model":       model.state_dict(),
             "overall_acc": overall_acc,  
             "overall_eer": overall_eer,
-            "val_acc":     val_acc,
         }, "best_model.pth")
-        print(f"  ⭐ Saved  (Dev Acc={overall_acc:.4f}  EER={overall_eer:.2f}%)")
+        print(f"  ⭐ Saved! New Best Dev EER: {overall_eer:.2f}%")
     else:
         no_improve += 1
         print(f"  No improvement ({no_improve}/{PATIENCE})")
         if no_improve >= PATIENCE:
-            print("🛑 Early stopping")
+            print("🛑 Early stopping triggered. Training Complete.")
             break
 
-print(f"\n🏁 DONE  |  Best Dev Acc: {best_acc:.4f}")
+print(f"\n🏁 DONE  |  Best Dev EER Achieved: {best_eer:.2f}%")
